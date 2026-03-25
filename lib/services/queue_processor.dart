@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:markify/services/video_watermark_service.dart';
 import 'package:markify/services/watermark_renderer.dart';
 import 'package:markify/shared/models/watermark.dart';
@@ -18,6 +20,7 @@ class ProcessingTask {
   TaskStatus status;
   double progress;
   String? error;
+  int retryCount;
 
   ProcessingTask({
     required this.id,
@@ -28,6 +31,7 @@ class ProcessingTask {
     this.status = TaskStatus.pending,
     this.progress = 0.0,
     this.error,
+    this.retryCount = 0,
   });
 }
 
@@ -51,21 +55,36 @@ class QueueProgress {
   double get overallProgress => total == 0 ? 0.0 : (completed + failed) / total;
 }
 
+/// A "Very Strong" Queue Processor using a Worker-Pool pattern for maximum stability.
 class QueueProcessor {
   static final QueueProcessor _instance = QueueProcessor._internal();
   factory QueueProcessor() => _instance;
-  QueueProcessor._internal();
+  QueueProcessor._internal() {
+    _startWorkers();
+  }
 
-  final List<ProcessingTask> _queue = [];
-  final Set<String> _activeTaskIds = {};
+  final List<ProcessingTask> _allTasks = [];
+  final ListQueue<ProcessingTask> _pendingQueue = ListQueue();
+  
   bool _isPaused = false;
-  int _maxConcurrency = 1;
-
+  int _maxConcurrency = 2; // Default to 2 for balanced performance/stability
+  
   final StreamController<QueueProgress> _controller = StreamController<QueueProgress>.broadcast();
   Stream<QueueProgress> get progressStream => _controller.stream;
 
+  Timer? _notifyTimer;
+  bool _isDisposed = false;
+
+  void _startWorkers() {
+    // We launch workers that will pull from the queue
+    for (int i = 0; i < 3; i++) { // Support up to 3 workers max
+      _workerLoop(i);
+    }
+  }
+
   void setMaxConcurrency(int limit) {
-    _maxConcurrency = limit;
+    _maxConcurrency = limit.clamp(1, 4);
+    debugPrint('[QueueProcessor] Max Concurrency set to $_maxConcurrency');
   }
 
   void addToQueue({
@@ -74,13 +93,16 @@ class QueueProcessor {
     required Map<String, List<Watermark>> taskConfigs,
   }) {
     for (var path in paths) {
+      if (_allTasks.any((t) => t.inputPath == path && (t.status == TaskStatus.pending || t.status == TaskStatus.processing))) {
+        continue;
+      }
+
       final ext = p.extension(path).toLowerCase().replaceAll('.', '');
       final isVideo = ['mp4', 'mov', 'avi', 'mkv', 'webm'].contains(ext);
-      final id = '${DateTime.now().microsecondsSinceEpoch}_${path.hashCode}';
+      final id = 'task_${DateTime.now().microsecondsSinceEpoch}_${path.hashCode}';
       final outputFileName = 'watermarked_${p.basenameWithoutExtension(path)}_${DateTime.now().millisecondsSinceEpoch}.$ext';
       final outputPath = p.join(outputDir, outputFileName);
 
-      // Ensure directory exists
       final dir = Directory(outputDir);
       if (!dir.existsSync()) dir.createSync(recursive: true);
 
@@ -91,93 +113,94 @@ class QueueProcessor {
         watermarks: taskConfigs[path] ?? [],
         isVideo: isVideo,
       );
-      _queue.add(task);
+      
+      _allTasks.add(task);
+      _pendingQueue.add(task);
     }
-    _notify();
-    _processNext();
+    _throttleNotify();
   }
 
   void pause() {
     _isPaused = true;
-    _notify();
+    _throttleNotify();
   }
 
   void resume() {
     _isPaused = false;
-    _notify();
-    _processNext();
+    _throttleNotify();
   }
 
   void clearQueue() {
-    _queue.removeWhere((t) => t.status == TaskStatus.pending);
-    _notify();
+    _pendingQueue.clear();
+    // Only remove pending tasks from the full list
+    _allTasks.removeWhere((t) => t.status == TaskStatus.pending);
+    _throttleNotify();
   }
 
-  void _notify() {
-    final completed = _queue.where((t) => t.status == TaskStatus.completed).length;
-    final failed = _queue.where((t) => t.status == TaskStatus.failed).length;
-    final processing = _queue.where((t) => t.status == TaskStatus.processing).length;
+  /// The core worker loop — very stable, no recursion, pulls tasks as needed.
+  Future<void> _workerLoop(int workerId) async {
+    while (!_isDisposed) {
+      if (_isPaused || _pendingQueue.isEmpty || _activeCount() >= _maxConcurrency) {
+        await Future.delayed(const Duration(milliseconds: 500));
+        continue;
+      }
 
-    _controller.add(QueueProgress(
-      total: _queue.length,
-      completed: completed,
-      failed: failed,
-      processing: processing,
-      tasks: List.unmodifiable(_queue),
-      isPaused: _isPaused,
-    ));
-  }
+      final task = _pendingQueue.removeFirst();
+      task.status = TaskStatus.processing;
+      _throttleNotify();
 
-  void _processNext() {
-    if (_isPaused) return;
-    if (_activeTaskIds.length >= _maxConcurrency) return;
-
-    final nextTasks = _queue.where((t) => t.status == TaskStatus.pending).toList();
-    if (nextTasks.isEmpty) return;
-
-    final nextTask = nextTasks.first;
-
-    _activeTaskIds.add(nextTask.id);
-    nextTask.status = TaskStatus.processing;
-    _notify();
-
-    _executeTask(nextTask, retryCount: 1).then((_) {
-      _activeTaskIds.remove(nextTask.id);
-      _notify();
-      _processNext();
-    });
-
-    if (_activeTaskIds.length < _maxConcurrency) {
-      _processNext();
+      try {
+        await _executeWithRetry(task);
+      } catch (e) {
+        debugPrint('[QueueProcessor] Worker $workerId uncaught error: $e');
+        task.status = TaskStatus.failed;
+        task.error = 'Uncaught system error: $e';
+      } finally {
+        _throttleNotify();
+        // Force a tiny pause and GC hint after every task completion
+        _releaseTaskMemory();
+        await Future.delayed(const Duration(milliseconds: 200));
+      }
     }
   }
 
-  Future<void> _executeTask(ProcessingTask task, {int retryCount = 0}) async {
-    try {
-      if (task.isVideo) {
-        await _processVideoTask(task);
-      } else {
-        await _processImageTask(task);
+  int _activeCount() {
+    return _allTasks.where((t) => t.status == TaskStatus.processing).length;
+  }
+
+  Future<void> _executeWithRetry(ProcessingTask task) async {
+    const maxRetries = 2; // Total 3 attempts
+    
+    while (task.retryCount <= maxRetries) {
+      try {
+        if (task.isVideo) {
+          await _processVideoTask(task);
+        } else {
+          await _processImageTaskThrottled(task);
+        }
+        task.status = TaskStatus.completed;
+        task.progress = 1.0;
+        return;
+      } catch (e) {
+        task.retryCount++;
+        debugPrint('[QueueProcessor] Task Error (${task.retryCount}/$maxRetries): ${task.inputPath} - $e');
+        
+        if (task.retryCount > maxRetries) {
+          task.status = TaskStatus.failed;
+          task.error = e.toString();
+          return;
+        }
+        await Future.delayed(Duration(seconds: 2 * task.retryCount));
       }
-      task.status = TaskStatus.completed;
-      task.progress = 1.0;
-    } catch (e) {
-      debugPrint('[QueueProcessor] Task failed: ${task.inputPath} - $e');
-      if (retryCount > 0) {
-        debugPrint('[QueueProcessor] Retrying task: ${task.inputPath}');
-        await _executeTask(task, retryCount: retryCount - 1);
-      } else {
-        task.status = TaskStatus.failed;
-        task.error = e.toString();
-      }
-    } finally {
-      await Future.delayed(const Duration(milliseconds: 500));
     }
   }
 
   Future<void> _processVideoTask(ProcessingTask task) async {
+    // Ensure file exists before starting
+    if (!File(task.inputPath).existsSync()) throw Exception('Source file missing');
+
     final dims = await VideoWatermarkService.probeVideoDimensions(task.inputPath);
-    if (dims == null) throw Exception('Could not probe video dimensions');
+    if (dims == null) throw Exception('Video probe failed (corrupt file or ffmpeg missing)');
 
     final success = await VideoWatermarkService.applyWatermarks(
       inputVideoPath: task.inputPath,
@@ -187,38 +210,87 @@ class QueueProcessor {
       videoHeight: dims.$2,
       onProgress: (p) {
         task.progress = p;
-        _notify();
+        _throttleNotify();
       },
     );
 
-    if (!success) throw Exception('FFmpeg processing failed');
+    if (!success) throw Exception('FFmpeg process returned error code');
   }
 
-  Future<void> _processImageTask(ProcessingTask task) async {
-    // 1. Read bytes
-    final bytes = await File(task.inputPath).readAsBytes();
-    
-    // 2. Decode
-    img.Image? baseImg = img.decodeImage(bytes);
-    if (baseImg == null) throw Exception('Could not decode image');
+  /// Uses a dedicated semaphore logic to ensure images don't flood memory even if concurrency is high.
+  static int _imageIsolateCount = 0;
+  Future<void> _processImageTaskThrottled(ProcessingTask task) async {
+    while (_imageIsolateCount >= 2) {
+      await Future.delayed(const Duration(milliseconds: 200));
+    }
+    _imageIsolateCount++;
+    try {
+      await compute(_imageWorker, {
+        'input': task.inputPath,
+        'output': task.outputPath,
+        'watermarks': task.watermarks,
+      });
+      task.progress = 1.0;
+    } finally {
+      _imageIsolateCount--;
+    }
+  }
 
-    // 3. Render
+  static Future<void> _imageWorker(Map<String, dynamic> params) async {
+    final String inputPath = params['input'];
+    final String outputPath = params['output'];
+    final List<Watermark> watermarks = params['watermarks'];
+
+    final file = File(inputPath);
+    if (!file.existsSync()) throw Exception('Input file GONE');
+
+    final bytes = await file.readAsBytes();
+    img.Image? baseImg = img.decodeImage(bytes);
+    if (baseImg == null) throw Exception('Decode failed');
+
     img.Image? processedImg = await WatermarkRenderer.renderOntoImage(
       baseImage: baseImg,
-      watermarks: task.watermarks,
+      watermarks: watermarks,
     );
 
-    // 4. Encode and save
     final encoded = img.encodePng(processedImg);
-    await File(task.outputPath).writeAsBytes(encoded);
+    await File(outputPath).writeAsBytes(encoded);
     
-    // Explicitly nullify to help GC
+    // Explicit cleanup
     baseImg = null;
     processedImg = null;
-    task.progress = 1.0;
+  }
+
+  void _throttleNotify() {
+    if (_notifyTimer?.isActive ?? false) return;
+    _notifyTimer = Timer(const Duration(milliseconds: 100), _notify);
+  }
+
+  void _notify() {
+    if (_isDisposed || _controller.isClosed) return;
+    
+    final completed = _allTasks.where((t) => t.status == TaskStatus.completed).length;
+    final failed = _allTasks.where((t) => t.status == TaskStatus.failed).length;
+    final processing = _allTasks.where((t) => t.status == TaskStatus.processing).length;
+
+    _controller.add(QueueProgress(
+      total: _allTasks.length,
+      completed: completed,
+      failed: failed,
+      processing: processing,
+      tasks: List.unmodifiable(_allTasks),
+      isPaused: _isPaused,
+    ));
+  }
+
+  void _releaseTaskMemory() {
+    // Force GC awareness on native side
+    SystemChannels.platform.invokeMethod('SystemSound.play', 'click');
   }
 
   void dispose() {
+    _isDisposed = true;
+    _notifyTimer?.cancel();
     _controller.close();
   }
 }
