@@ -10,8 +10,10 @@ import 'package:markify/features/editor/presentation/widgets/editor_sidebar.dart
 import 'package:markify/features/export/services/image_exporter.dart';
 import 'package:markify/services/video_watermark_service.dart';
 import 'package:markify/services/batch_processor.dart';
+import 'package:markify/services/queue_processor.dart';
 import 'package:markify/features/license/providers/license_provider.dart';
 import 'package:markify/features/license/presentation/screens/license_screen.dart';
+import 'package:path/path.dart' as p;
 
 // ─── Home ─────────────────────────────────────────────────────────────────────
 
@@ -406,6 +408,7 @@ class _BatchExportProgressDialogState extends State<_BatchExportProgressDialog> 
   int _success = 0;
   int _failed = 0;
   bool _completed = false;
+  bool _isPaused = false;
 
   @override
   void initState() {
@@ -460,15 +463,86 @@ class _BatchExportProgressDialogState extends State<_BatchExportProgressDialog> 
               const SizedBox(height: 24),
               Row(
                 children: [
-                  const SizedBox(
+                   SizedBox(
                     width: 16,
                     height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+                    child: _isPaused 
+                      ? const Icon(Icons.pause, size: 16, color: Colors.orange)
+                      : const CircularProgressIndicator(strokeWidth: 2),
                   ),
                   const SizedBox(width: 12),
-                  Text('Processing $_current of $_total files…',
-                      style: theme.textTheme.bodyMedium),
+                  Expanded(
+                    child: Text(
+                      _isPaused 
+                        ? 'Paused ($_current/$_total)' 
+                        : 'Processing $_current/$_total files…',
+                      style: theme.textTheme.bodyMedium,
+                    ),
+                  ),
+                  IconButton(
+                    icon: Icon(_isPaused ? Icons.play_arrow : Icons.pause),
+                    onPressed: () {
+                      if (_isPaused) {
+                        QueueProcessor().resume();
+                      } else {
+                        QueueProcessor().pause();
+                      }
+                      setState(() {
+                        _isPaused = !_isPaused;
+                      });
+                    },
+                  ),
                 ],
+              ),
+              const SizedBox(height: 16),
+              // Task list
+              SizedBox(
+                height: 120,
+                child: StreamBuilder<QueueProgress>(
+                  stream: QueueProcessor().progressStream,
+                  builder: (context, snapshot) {
+                    final progress = snapshot.data;
+                    final totalPaths = widget.state.mediaPaths as List<String>;
+                    final batchTasks = (progress?.tasks ?? [])
+                        .where((t) => totalPaths.contains(t.inputPath))
+                        .toList();
+
+                    return ListView.separated(
+                      padding: EdgeInsets.zero,
+                      itemCount: batchTasks.length,
+                      separatorBuilder: (_, __) => const Divider(height: 1),
+                      itemBuilder: (context, index) {
+                        final task = batchTasks[index];
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 4),
+                          child: Row(
+                            children: [
+                              _getTaskStatusIcon(task.status),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  p.basename(task.inputPath),
+                                  style: const TextStyle(fontSize: 11),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              if (task.status == TaskStatus.processing)
+                                SizedBox(
+                                  width: 40,
+                                  child: Text(
+                                    '${(task.progress * 100).toInt()}%',
+                                    style: const TextStyle(fontSize: 10, color: Colors.grey),
+                                    textAlign: TextAlign.end,
+                                  ),
+                                ),
+                            ],
+                          ),
+                        );
+                      },
+                    );
+                  },
+                ),
               ),
             ] else ...[
               const Icon(Icons.check_circle, color: Colors.green, size: 64),
@@ -511,6 +585,23 @@ class _BatchExportProgressDialogState extends State<_BatchExportProgressDialog> 
           ),
       ],
     );
+  }
+
+  Widget _getTaskStatusIcon(TaskStatus status) {
+    switch (status) {
+      case TaskStatus.pending:
+        return const Icon(Icons.timer_outlined, size: 14, color: Colors.grey);
+      case TaskStatus.processing:
+        return const SizedBox(
+          width: 12,
+          height: 12,
+          child: CircularProgressIndicator(strokeWidth: 1.5),
+        );
+      case TaskStatus.completed:
+        return const Icon(Icons.check_circle, size: 14, color: Colors.green);
+      case TaskStatus.failed:
+        return const Icon(Icons.error, size: 14, color: Colors.red);
+    }
   }
 }
 

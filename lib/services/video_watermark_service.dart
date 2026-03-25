@@ -50,7 +50,7 @@ class VideoWatermarkService {
     }
 
     final tempDir = await getTemporaryDirectory();
-    final sessionPath = '${tempDir.path}/export_${DateTime.now().millisecondsSinceEpoch}';
+    final sessionPath = '${tempDir.path}/export_${DateTime.now().microsecondsSinceEpoch}';
     await Directory(sessionPath).create(recursive: true);
 
     try {
@@ -222,12 +222,17 @@ class VideoWatermarkService {
   }
 
 
+  static bool? _hasCachedFfmpeg;
+  
   static Future<bool> _checkSystemFfmpeg() async {
+    if (_hasCachedFfmpeg != null) return _hasCachedFfmpeg!;
     try {
       final exe = _ffmpegPath;
-      final res = await Process.run(exe, ['-version'], runInShell: true);
-      return res.exitCode == 0;
+      final res = await Process.run(exe, ['-version']);
+      _hasCachedFfmpeg = res.exitCode == 0;
+      return _hasCachedFfmpeg!;
     } catch (_) { 
+      _hasCachedFfmpeg = false;
       return false; 
     }
   }

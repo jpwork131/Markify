@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -24,6 +25,8 @@ class WatermarkRenderer {
     return result;
   }
 
+  static final _SimpleLock _buildLock = _SimpleLock();
+
   /// Saves each visible watermark as a PNG and returns descriptors
   /// that tell FFmpeg where to overlay each PNG onto the video.
   static Future<List<FfmpegOverlayDescriptor>> buildFfmpegDescriptors({
@@ -32,6 +35,7 @@ class WatermarkRenderer {
     required int videoH,
     required String tempDir,
   }) async {
+    await _buildLock.acquire();
     try {
       final descriptors = <FfmpegOverlayDescriptor>[];
       int counter = 0;
@@ -71,6 +75,8 @@ class WatermarkRenderer {
     } catch (e) {
       debugPrint('[WatermarkRenderer] Build descriptors error: $e');
       rethrow;
+    } finally {
+      _buildLock.release();
     }
   }
 
@@ -122,7 +128,7 @@ class WatermarkRenderer {
     final int renderH = (textPainter.height * scale).round().clamp(1, 16383);
 
     final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder);
+    final canvas = ui.Canvas(recorder);
     canvas.scale(scale);
     textPainter.paint(canvas, Offset.zero);
     final picture = recorder.endRecording();
@@ -186,6 +192,22 @@ class WatermarkRenderer {
     for (final pixel in image) {
       pixel.a = pixel.a * opacity;
     }
+  }
+}
+
+class _SimpleLock {
+  Completer<void>? _completer;
+
+  Future<void> acquire() async {
+    while (_completer != null) {
+      await _completer!.future;
+    }
+    _completer = Completer<void>();
+  }
+
+  void release() {
+    _completer?.complete();
+    _completer = null;
   }
 }
 
