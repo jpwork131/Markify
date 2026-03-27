@@ -450,7 +450,7 @@ class _BatchExportProgressDialogState extends State<_BatchExportProgressDialog> 
     return AlertDialog(
       title: const Text('Batch Processing'),
       content: SizedBox(
-        width: 300,
+        width: 350,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -460,27 +460,33 @@ class _BatchExportProgressDialogState extends State<_BatchExportProgressDialog> 
                 backgroundColor: theme.primaryColor.withValues(alpha: 0.1),
                 borderRadius: BorderRadius.circular(4),
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: 12),
+              Text(
+                'Overall Progress: ${(_current / _total * 100).toInt()}%',
+                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 16),
               Row(
                 children: [
                    SizedBox(
                     width: 16,
                     height: 16,
                     child: _isPaused 
-                      ? const Icon(Icons.pause, size: 16, color: Colors.orange)
+                      ? const Icon(Icons.pause_circle_filled, size: 16, color: Colors.orange)
                       : const CircularProgressIndicator(strokeWidth: 2),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
                     child: Text(
                       _isPaused 
-                        ? 'Paused ($_current/$_total)' 
-                        : 'Processing $_current/$_total files…',
+                        ? 'System Paused' 
+                        : 'Workers active: $_current/$_total files done',
                       style: theme.textTheme.bodyMedium,
                     ),
                   ),
                   IconButton(
                     icon: Icon(_isPaused ? Icons.play_arrow : Icons.pause),
+                    tooltip: _isPaused ? 'Resume Processing' : 'Pause Processing',
                     onPressed: () {
                       if (_isPaused) {
                         QueueProcessor().resume();
@@ -494,46 +500,83 @@ class _BatchExportProgressDialogState extends State<_BatchExportProgressDialog> 
                   ),
                 ],
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 12),
+              const Divider(),
               // Task list
               SizedBox(
-                height: 120,
-                child: StreamBuilder<QueueProgress>(
-                  stream: QueueProcessor().progressStream,
+                height: 200,
+                child: StreamBuilder<QueueState>(
+                  stream: QueueProcessor().stateStream,
                   builder: (context, snapshot) {
-                    final progress = snapshot.data;
+                    final state = snapshot.data;
+                    if (state == null) return const Center(child: Text('Loading queue...'));
+
                     final totalPaths = widget.state.mediaPaths as List<String>;
-                    final batchTasks = (progress?.tasks ?? [])
-                        .where((t) => totalPaths.contains(t.inputPath))
+                    final allJobs = [
+                      ...state.pendingQueue,
+                      ...state.activeWorkers,
+                      ...state.completedJobs,
+                      ...state.failedJobs,
+                    ];
+                    final batchJobs = allJobs
+                        .where((j) => totalPaths.contains(j.inputPath))
                         .toList();
 
                     return ListView.separated(
                       padding: EdgeInsets.zero,
-                      itemCount: batchTasks.length,
+                      itemCount: batchJobs.length,
                       separatorBuilder: (_, __) => const Divider(height: 1),
                       itemBuilder: (context, index) {
-                        final task = batchTasks[index];
+                        final job = batchJobs[index];
                         return Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 4),
-                          child: Row(
+                          padding: const EdgeInsets.symmetric(vertical: 6),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              _getTaskStatusIcon(task.status),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  p.basename(task.inputPath),
-                                  style: const TextStyle(fontSize: 11),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
+                              Row(
+                                children: [
+                                  _getJobStatusIcon(job.status),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      p.basename(job.inputPath),
+                                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                  if (job.status == JobStatus.failed)
+                                    IconButton(
+                                      icon: const Icon(Icons.refresh, size: 16, color: Colors.blue),
+                                      padding: EdgeInsets.zero,
+                                      constraints: const BoxConstraints(),
+                                      tooltip: 'Retry Job',
+                                      onPressed: () => QueueProcessor().retryFailedJob(job.id),
+                                    ),
+                                  if (job.status == JobStatus.processing)
+                                    Text(
+                                      '${(job.progress * 100).toInt()}%',
+                                      style: const TextStyle(fontSize: 10, color: Colors.blueAccent),
+                                    ),
+                                ],
                               ),
-                              if (task.status == TaskStatus.processing)
-                                SizedBox(
-                                  width: 40,
+                              if (job.status == JobStatus.processing)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 4, left: 22),
+                                  child: LinearProgressIndicator(
+                                    value: job.progress,
+                                    minHeight: 2,
+                                    backgroundColor: Colors.grey.withValues(alpha: 0.1),
+                                  ),
+                                ),
+                              if (job.status == JobStatus.failed && job.errorMessage != null)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 2, left: 22),
                                   child: Text(
-                                    '${(task.progress * 100).toInt()}%',
-                                    style: const TextStyle(fontSize: 10, color: Colors.grey),
-                                    textAlign: TextAlign.end,
+                                    job.errorMessage!,
+                                    style: const TextStyle(fontSize: 9, color: Colors.redAccent),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
                                   ),
                                 ),
                             ],
@@ -545,27 +588,28 @@ class _BatchExportProgressDialogState extends State<_BatchExportProgressDialog> 
                 ),
               ),
             ] else ...[
-              const Icon(Icons.check_circle, color: Colors.green, size: 64),
+              const Icon(Icons.check_circle_rounded, color: Colors.green, size: 60),
               const SizedBox(height: 16),
-              Text('Done!', style: theme.textTheme.titleLarge),
+              Text('Batch Completed', style: theme.textTheme.titleMedium),
               const SizedBox(height: 16),
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
                   color: theme.dividerColor.withValues(alpha: 0.05),
-                  borderRadius: BorderRadius.circular(8),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: theme.dividerColor.withValues(alpha: 0.1)),
                 ),
                 child: Column(
                   children: [
                     _ResultRow(
-                      icon: Icons.check_circle_outline,
+                      icon: Icons.done_all,
                       label: 'Successful',
                       count: _success,
                       color: Colors.green,
                     ),
                     const Divider(height: 16),
                     _ResultRow(
-                      icon: Icons.error_outline,
+                      icon: Icons.warning_amber_rounded,
                       label: 'Failed',
                       count: _failed,
                       color: _failed > 0 ? Colors.red : Colors.grey,
@@ -573,34 +617,49 @@ class _BatchExportProgressDialogState extends State<_BatchExportProgressDialog> 
                   ],
                 ),
               ),
+              const SizedBox(height: 12),
+              Text(
+                'Logs saved to: /logs/error.log',
+                style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+              ),
             ],
           ],
         ),
       ),
       actions: [
-        if (_completed)
-          FilledButton(
+        if (_completed || _isPaused)
+          TextButton(
             onPressed: () => Navigator.of(context, rootNavigator: true).pop(),
-            child: const Text('OK'),
+            child: const Text('Close'),
+          ),
+        if (!_completed && !_isPaused)
+           TextButton(
+            onPressed: () {
+              QueueProcessor().pause();
+              Navigator.of(context, rootNavigator: true).pop();
+            },
+            child: const Text('Run in Background'),
           ),
       ],
     );
   }
 
-  Widget _getTaskStatusIcon(TaskStatus status) {
+  Widget _getJobStatusIcon(JobStatus status) {
     switch (status) {
-      case TaskStatus.pending:
-        return const Icon(Icons.timer_outlined, size: 14, color: Colors.grey);
-      case TaskStatus.processing:
+      case JobStatus.pending:
+        return const Icon(Icons.hourglass_empty, size: 14, color: Colors.grey);
+      case JobStatus.paused:
+        return const Icon(Icons.pause_circle_outline, size: 14, color: Colors.orange);
+      case JobStatus.processing:
         return const SizedBox(
           width: 12,
           height: 12,
-          child: CircularProgressIndicator(strokeWidth: 1.5),
+          child: CircularProgressIndicator(strokeWidth: 2),
         );
-      case TaskStatus.completed:
+      case JobStatus.completed:
         return const Icon(Icons.check_circle, size: 14, color: Colors.green);
-      case TaskStatus.failed:
-        return const Icon(Icons.error, size: 14, color: Colors.red);
+      case JobStatus.failed:
+        return const Icon(Icons.error_outline, size: 14, color: Colors.red);
     }
   }
 }

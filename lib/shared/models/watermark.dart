@@ -57,6 +57,35 @@ abstract class Watermark {
     this.animationSpeed = 1.0,
   });
 
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is Watermark &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          normalizedCenterX == other.normalizedCenterX &&
+          normalizedCenterY == other.normalizedCenterY &&
+          normalizedWidth == other.normalizedWidth &&
+          normalizedHeight == other.normalizedHeight &&
+          rotation == other.rotation &&
+          opacity == other.opacity &&
+          isVisible == other.isVisible &&
+          animationType == other.animationType &&
+          animationSpeed == other.animationSpeed;
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      normalizedCenterX.hashCode ^
+      normalizedCenterY.hashCode ^
+      normalizedWidth.hashCode ^
+      normalizedHeight.hashCode ^
+      rotation.hashCode ^
+      opacity.hashCode ^
+      isVisible.hashCode ^
+      animationType.hashCode ^
+      animationSpeed.hashCode;
+
   Watermark copyWith({
     String? id,
     double? normalizedCenterX,
@@ -70,6 +99,7 @@ abstract class Watermark {
     double? animationSpeed,
   });
 }
+
 
 class TextWatermark extends Watermark {
   final String text;
@@ -95,6 +125,25 @@ class TextWatermark extends Watermark {
     this.fontWeight = FontWeight.bold,
     this.fontFamily,
   });
+
+  @override
+  bool operator ==(Object other) =>
+      super == other &&
+      other is TextWatermark &&
+      text == other.text &&
+      fontSize == other.fontSize &&
+      color == other.color &&
+      fontWeight == other.fontWeight &&
+      fontFamily == other.fontFamily;
+
+  @override
+  int get hashCode =>
+      super.hashCode ^
+      text.hashCode ^
+      fontSize.hashCode ^
+      color.hashCode ^
+      fontWeight.hashCode ^
+      fontFamily.hashCode;
 
   @override
   TextWatermark copyWith({
@@ -150,6 +199,15 @@ class LogoWatermark extends Watermark {
     super.animationSpeed,
     required this.imagePath,
   });
+
+  @override
+  bool operator ==(Object other) =>
+      super == other &&
+      other is LogoWatermark &&
+      imagePath == other.imagePath;
+
+  @override
+  int get hashCode => super.hashCode ^ imagePath.hashCode;
 
   @override
   LogoWatermark copyWith({

@@ -4,7 +4,8 @@ project(flutter_application_1 LANGUAGES CXX)
 
 # The name of the executable created for the application. Change this to change
 # the on-disk name of your application.
-set(BINARY_NAME "flutter_application_1")
+set(BINARY_NAME "Markify")
+
 
 # Explicitly opt in to modern CMake behaviors to avoid warnings with recent
 # versions of CMake.
@@ -106,3 +107,11 @@ install(DIRECTORY "${PROJECT_BUILD_DIR}/${FLUTTER_ASSET_DIR_NAME}"
 install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   CONFIGURATIONS Profile;Release
   COMPONENT Runtime)
+
+# --- FFmpeg Bundling (Added) ---
+# Copy ffmpeg.exe and ffprobe.exe to the output directory
+set(PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
+install(FILES "${PROJECT_ROOT}/ffmpeg.exe" "${PROJECT_ROOT}/ffprobe.exe"
+  DESTINATION "${CMAKE_INSTALL_PREFIX}"
+  COMPONENT Runtime)
+
